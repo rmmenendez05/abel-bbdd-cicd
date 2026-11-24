@@ -1,0 +1,104 @@
+name: CI-CD
+
+# checkout -> test -> package -> deploy
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.12"
+  FUNCTION_NAME: hello-serverless
+  AWS_REGION: eu-north-1
+
+jobs:
+  checkout:
+    name: Checkout
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el código del repositorio
+        uses: actions/checkout@v4
+
+      - name: Guardar el código para los siguientes jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: source
+          path: |
+            handler.py
+            conftest.py
+            requirements.txt
+            tests/
+          retention-days: 1
+
+  test:
+    name: Test
+    needs: checkout
+    runs-on: ubuntu-latest
+    steps:
+      - name: Recuperar el código del job checkout
+        uses: actions/download-artifact@v4
+        with:
+          name: source
+
+      - name: Instalar Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar tests
+        run: python -m pytest -v
+
+  package:
+    name: Package
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Recuperar el código del job checkout
+        uses: actions/download-artifact@v4
+        with:
+          name: source
+
+      - name: Crear el paquete de la Lambda
+        # Solo el código de la función: los tests y pytest no van a producción.
+        run: |
+          zip function.zip handler.py
+          unzip -l function.zip
+
+      - name: Publicar el paquete
+        uses: actions/upload-artifact@v4
+        with:
+          name: lambda-package
+          path: function.zip
+          retention-days: 7
+
+  deploy:
+    name: Deploy
+    needs: package
+    # Solo se despliega con push a main (no en pull requests).
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el paquete
+        uses: actions/download-artifact@v4
+        with:
+          name: lambda-package
+
+      - name: Configurar credenciales de AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Desplegar la función
+        run: |
+          aws lambda update-function-code \
+            --function-name "$FUNCTION_NAME" \
+            --zip-file fileb://function.zip
+          aws lambda wait function-updated --function-name "$FUNCTION_NAME"
